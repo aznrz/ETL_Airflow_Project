@@ -1,0 +1,12 @@
+PLAN.md
+Plan.png
+
+# Результаты работы DAG (папки сохраняем через .gitkeep)
+archive/*
+!archive/.gitkeep
+output/*
+!output/.gitkeep
+
+# Python и редактор
+__pycache__/
+.vscode/
