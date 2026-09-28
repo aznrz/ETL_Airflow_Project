@@ -35,7 +35,7 @@ def verify_copy():
 with DAG(
     dag_id="copy_file_dag",
     start_date=datetime(2026, 9, 1),
-    schedule=None,      # пока только ручной запуск
+    schedule="0 3 * * *",   # каждый день в 03:00 UTC = 08:00 Алматы
     catchup=False,
     tags=["learning"],
 ) as dag:
