@@ -105,14 +105,21 @@ docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
 
 > ⚠️ Логины и пароли в `docker-compose.yaml` — стандартные значения для локальной разработки. В продакшене их использовать нельзя.
 
-<!-- Скриншоты: положите картинки в docs/ и раскомментируйте
 ---
 
 ## 🖼️ Скриншоты
 
+**Список DAG** — `copy_file_dag` включён, расписание `0 3 * * *`, все запуски успешны:
+
+![Список DAG](docs/dag_list.png)
+
+**Граф DAG** — три задачи выполнились успешно:
+
 ![Граф DAG](docs/dag_graph.png)
-![Логи задачи](docs/task_logs.png)
--->
+
+**Лог задачи `verify_copy`** — размер копии совпал с оригиналом:
+
+![Лог задачи](docs/task_logs.png)
 
 ---
 
@@ -120,11 +127,13 @@ docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
 
 - [x] Окружение Airflow + PostgreSQL в Docker
 - [x] DAG приёма и архивирования файла с проверкой
-- [ ] Обработка ошибок и повторные запуски
 - [x] Ежедневное расписание (08:00 по Алматы)
-- [ ] ETL-DAG: CSV → PostgreSQL
-- [ ] Отчёт Power BI поверх PostgreSQL
-- [ ] Выгрузка в сетевую папку
+- [ ] ETL-DAG: CSV → PostgreSQL (слой raw)
+- [ ] Слои данных: raw → staging → mart
+- [ ] Проверки качества данных перед загрузкой
+- [ ] Автоматическая обработка новых файлов без повторной загрузки
+- [ ] Уведомления об ошибках в Telegram
+- [ ] Отчёт Power BI поверх витрины mart
 
 ---
 

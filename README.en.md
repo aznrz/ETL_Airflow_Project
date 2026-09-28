@@ -105,14 +105,21 @@ Open http://localhost:8080 and log in as `admin` with that password. Unpause `co
 
 > ⚠️ Credentials in `docker-compose.yaml` are local development defaults. Do not reuse them in production.
 
-<!-- Screenshots: add images to docs/ and uncomment
 ---
 
 ## 🖼️ Screenshots
 
+**DAG list** — `copy_file_dag` is active on a `0 3 * * *` schedule, all runs succeeded:
+
+![DAG list](docs/dag_list.png)
+
+**DAG graph** — all three tasks completed successfully:
+
 ![DAG graph](docs/dag_graph.png)
-![Task logs](docs/task_logs.png)
--->
+
+**`verify_copy` task log** — the archived copy matches the source size:
+
+![Task log](docs/task_logs.png)
 
 ---
 
@@ -120,11 +127,13 @@ Open http://localhost:8080 and log in as `admin` with that password. Unpause `co
 
 - [x] Dockerized Airflow + PostgreSQL environment
 - [x] File ingestion and archiving DAG with validation
-- [ ] Error handling and retries
 - [x] Daily schedule (08:00 Almaty time)
-- [ ] CSV → PostgreSQL ETL DAG
-- [ ] Power BI report on top of PostgreSQL
-- [ ] Export to a network file share
+- [ ] CSV → PostgreSQL ETL DAG (raw layer)
+- [ ] Data layers: raw → staging → mart
+- [ ] Data quality checks before downstream processing
+- [ ] Automatic processing of new files, without loading the same file twice
+- [ ] Failure alerts in Telegram
+- [ ] Power BI report on top of the mart layer
 
 ---
 
