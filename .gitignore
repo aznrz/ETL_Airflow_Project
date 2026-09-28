@@ -11,3 +11,7 @@ output/*
 # Python и редактор
 __pycache__/
 .vscode/
+
+# Исходные данные не храним в репозитории (см. README → «Как получить данные»)
+input/*
+!input/.gitkeep

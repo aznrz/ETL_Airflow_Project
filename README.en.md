@@ -80,9 +80,21 @@ The public Sample Superstore dataset: retail sales for 2014–2017.
 
 ---
 
+## 📥 Getting the data
+
+The dataset is not stored in the repository — download it yourself:
+
+1. Open the [Superstore Dataset on Kaggle](https://www.kaggle.com/datasets/vivek468/superstore-dataset-final) (a free account is required) and click **Download**.
+2. Unzip the archive, rename the CSV file to `superstore.csv` and put it in the `input/` folder.
+3. Check the size: **2,287,806 bytes**. A different size means a wrong or corrupted file.
+
+> ⚠️ **Do not open `superstore.csv` in Excel or a text editor, and do not save it.** An editor can silently change the encoding, line endings or date format, and the DAG will fail the header check or load corrupted data. If the file was opened, download it again.
+
+---
+
 ## 🚀 Getting started
 
-**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) and `superstore.csv` in the `input/` folder.
+**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) and `superstore.csv` in the `input/` folder (see [Getting the data](#-getting-the-data)).
 
 ```bash
 # 1. Clone the repository

@@ -80,9 +80,21 @@ read_csv  →  transform  →  load_postgres
 
 ---
 
+## 📥 Как получить данные
+
+Датасет в репозитории не хранится — скачайте его сами:
+
+1. Откройте [Superstore Dataset на Kaggle](https://www.kaggle.com/datasets/vivek468/superstore-dataset-final) (нужен бесплатный аккаунт) и нажмите **Download**.
+2. Распакуйте архив, переименуйте CSV-файл в `superstore.csv` и положите в папку `input/`.
+3. Проверьте размер: **2 287 806 байт**. Если размер другой — файл не тот или повреждён.
+
+> ⚠️ **Не открывайте `superstore.csv` в Excel или текстовом редакторе и не сохраняйте его.** Редактор может молча сменить кодировку, переносы строк или формат дат, и DAG упадёт на проверке заголовка или загрузит испорченные данные. Если файл открывали — скачайте заново.
+
+---
+
 ## 🚀 Запуск
 
-**Что нужно:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) и файл `superstore.csv` в папке `input/`.
+**Что нужно:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) и файл `superstore.csv` в папке `input/` (см. [Как получить данные](#-как-получить-данные)).
 
 ```bash
 # 1. Клонировать репозиторий
