@@ -137,4 +137,4 @@ docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
 
 ---
 
-*ETL Airflow Project, 2026 г.*
+*ETL Airflow Project · последнее обновление: 28.09.2026, 17:35 (Алматы, UTC+5)*

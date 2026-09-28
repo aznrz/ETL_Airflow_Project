@@ -137,4 +137,4 @@ Open http://localhost:8080 and log in as `admin` with that password. Unpause `co
 
 ---
 
-*ETL Airflow Project, 2026*
+*ETL Airflow Project · last updated: 28.09.2026, 17:35 (Almaty, UTC+5)*
