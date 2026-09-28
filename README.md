@@ -9,10 +9,10 @@
 ![Power BI](https://img.shields.io/badge/Power_BI-Reporting-F2C811)
 ![Статус](https://img.shields.io/badge/%D0%A1%D1%82%D0%B0%D1%82%D1%83%D1%81-%D0%92%20%D1%80%D0%B0%D0%B7%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B5-orange)
 
-ETL-пайплайн в Docker. Он принимает данные о сотрудниках из CSV-файлов, оркестрирует обработку через **Apache Airflow**, загружает результат в **PostgreSQL** и отдаёт его в **Power BI** для отчётности.
+ETL-пайплайн в Docker. Он загружает данные о продажах (Superstore) из CSV-файлов, оркестрирует обработку через **Apache Airflow**, складывает результат в **PostgreSQL** по слоям raw → staging → mart и отдаёт витрину в **Power BI** для отчётности.
 
 ```
-CSV / Excel  →  Airflow (Python)  →  PostgreSQL  →  Power BI
+CSV  →  Airflow (Python)  →  PostgreSQL (raw → staging → mart)  →  Power BI
 ```
 
 ---
@@ -31,25 +31,23 @@ CSV / Excel  →  Airflow (Python)  →  PostgreSQL  →  Power BI
 
 ## 🔄 Пайплайны
 
-### 📁 `copy_file_dag` — приём и архивирование файла
-
-```
-check_file  →  copy_to_archive  →  verify_copy
-```
-
-| Задача | Что делает |
-|---|---|
-| `check_file` | Проверяет, что исходный файл есть в `input/`. Если файла нет, пайплайн сразу останавливается. |
-| `copy_to_archive` | Копирует файл в `archive/` с сохранением метаданных. |
-| `verify_copy` | Сравнивает размеры исходного файла и копии, чтобы убедиться, что копия полная. |
-
-### 🐘 `employees_to_postgres` — загрузка в хранилище *(в разработке)*
+### 🐘 `superstore_raw_dag` — загрузка `superstore.csv` в слой raw
 
 ```
 read_csv  →  transform  →  load_postgres
 ```
 
-Читает `employees.csv`, очищает и преобразует данные, затем загружает их в отдельную базу PostgreSQL. Эта база не смешивается со служебной базой Airflow.
+| Задача | Что делает |
+|---|---|
+| `read_csv` | Проверяет, что файл есть и заголовок совпадает с ожидаемыми 21 колонкой, считает строки. |
+| `transform` | Перекодирует cp1252 → UTF-8, переводит заголовки в snake_case, добавляет технические колонки `source_file` и `loaded_at`. |
+| `load_postgres` | Заменяет строки этого файла в `raw.superstore`: `DELETE` и `COPY` в одной транзакции. |
+
+- **Сверка строк** на каждом шаге: если количество не сходится, DAG падает.
+- **Всё или ничего**: при ошибке транзакция откатывается, старые данные остаются нетронутыми.
+- **Идемпотентность**: повторный запуск не задваивает данные — удалено 9994, загружено 9994, в таблице по-прежнему 9994 строки.
+- **Без паролей в коде**: подключение берётся из Airflow Connection `etl_postgres`.
+- Данные проекта лежат в отдельной базе `etl_data`, она не смешивается со служебной базой Airflow.
 
 ---
 
@@ -58,30 +56,33 @@ read_csv  →  transform  →  load_postgres
 | Папка / файл | Что внутри |
 |---|---|
 | [dags/](dags/) | Описания DAG для Airflow |
-| [input/](input/) | Исходные файлы (пример: `employees.csv`, 1000 строк) |
-| [archive/](archive/) | Архивные копии обработанных файлов |
-| [output/](output/) | Результаты обработки |
+| [input/](input/) | Исходные файлы (`superstore.csv`) |
+| [output/](output/) | Промежуточные файлы (перекодированный CSV перед загрузкой) |
+| [archive/](archive/) | Архив обработанных файлов |
+| [docs/](docs/) | Скриншоты |
 | [docker-compose.yaml](docker-compose.yaml) | Сервисы Airflow и PostgreSQL |
 
 ---
 
-## 📊 Тестовые данные
+## 📊 Источник данных: `superstore.csv`
 
-`input/employees.csv` — 1000 строк, разделитель `;`:
+Открытый датасет Sample Superstore — продажи сетевого магазина за 2014–2017 годы.
 
-```
-id;name;department;salary
-1;Azamat;IT;500000
-2;Marat;Sales;400000
-```
-
-Отделы: IT, Sales, Finance, HR, Marketing, Logistics.
+| Параметр | Значение |
+|---|---|
+| Кодировка | cp1252 (Windows-1252), не UTF-8 |
+| Разделитель | запятая `,` |
+| Переносы строк | CRLF (`\r\n`) |
+| Строк | 9994 + заголовок |
+| Колонок | 21 |
+| Формат дат | М/Д/ГГГГ без ведущих нулей (`6/9/2014` = 9 июня) |
+| Особенности | 427 неразрывных пробелов (`\xa0`) в текстовых полях |
 
 ---
 
 ## 🚀 Запуск
 
-**Что нужно:** [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+**Что нужно:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) и файл `superstore.csv` в папке `input/`.
 
 ```bash
 # 1. Клонировать репозиторий
@@ -91,11 +92,23 @@ cd ETL_Airflow_Project
 # 2. Запустить Airflow и PostgreSQL
 docker compose up -d
 
-# 3. Получить сгенерированный пароль администратора
+# 3. Создать базу для данных проекта
+docker compose exec postgres psql -U airflow -c "CREATE DATABASE etl_data;"
+
+# 4. Создать подключение etl_postgres в Airflow
+docker compose exec airflow airflow connections add etl_postgres \
+  --conn-type postgres --conn-host postgres --conn-port 5432 \
+  --conn-schema etl_data --conn-login airflow --conn-password airflow
+
+# 5. Получить сгенерированный пароль администратора
 docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
 ```
 
-Откройте http://localhost:8080 и войдите под логином `admin` с этим паролем. Включите `copy_file_dag` и запустите его вручную. После этого копия файла появится в `archive/`.
+Откройте http://localhost:8080 и войдите под логином `admin` с этим паролем. Включите `superstore_raw_dag` и запустите его вручную. Проверить результат:
+
+```bash
+docker compose exec postgres psql -U airflow -d etl_data -c "SELECT COUNT(*) FROM raw.superstore;"
+```
 
 | Действие | Команда |
 |---|---|
@@ -103,21 +116,17 @@ docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
 | Статус контейнеров | `docker compose ps` |
 | Логи Airflow | `docker compose logs -f airflow` |
 
-> ⚠️ Логины и пароли в `docker-compose.yaml` — стандартные значения для локальной разработки. В продакшене их использовать нельзя.
+> ⚠️ Логины и пароли в `docker-compose.yaml` и в командах выше — стандартные значения для локальной разработки. В продакшене их использовать нельзя.
 
 ---
 
 ## 🖼️ Скриншоты
 
-**Список DAG** — `copy_file_dag` включён, расписание `0 3 * * *`, все запуски успешны:
-
-![Список DAG](docs/dag_list.png)
-
 **Граф DAG** — три задачи выполнились успешно:
 
 ![Граф DAG](docs/dag_graph.png)
 
-**Лог задачи `verify_copy`** — размер копии совпал с оригиналом:
+**Лог задачи `load_postgres`** — повторный запуск заменил 9994 строки, а не добавил их:
 
 ![Лог задачи](docs/task_logs.png)
 
@@ -126,15 +135,14 @@ docker compose exec airflow cat /opt/airflow/standalone_admin_password.txt
 ## 🎯 Дорожная карта
 
 - [x] Окружение Airflow + PostgreSQL в Docker
-- [x] DAG приёма и архивирования файла с проверкой
-- [x] Ежедневное расписание (08:00 по Алматы)
-- [ ] ETL-DAG: CSV → PostgreSQL (слой raw)
-- [ ] Слои данных: raw → staging → mart
+- [x] ETL-DAG: CSV → PostgreSQL (слой raw), идемпотентная загрузка
+- [ ] Слои данных: raw → staging → mart (звёздная схема)
 - [ ] Проверки качества данных перед загрузкой
 - [ ] Автоматическая обработка новых файлов без повторной загрузки
+- [ ] Ежедневное расписание
 - [ ] Уведомления об ошибках в Telegram
 - [ ] Отчёт Power BI поверх витрины mart
 
 ---
 
-*ETL Airflow Project · последнее обновление: 28.09.2026, 17:35 (Алматы, UTC+5)*
+*ETL Airflow Project · последнее обновление: 28.09.2026, 21:42 (Алматы, UTC+5)*
