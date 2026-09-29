@@ -34,12 +34,12 @@ Excel ─┘
 ## 🔄 Pipeline `superstore_raw_dag`
 
 ```
-read_csv   → transform       → load_postgres       ─┐
-                                                    ├─→ build_staging → build_mart
-read_excel → transform_excel → load_excel_postgres ─┘
+read_csv   → transform       → load_postgres       ─┐                 ┌─→ stg_superstore ─→ dim_customer, dim_product, dim_date ─┐
+                                                    ├─→ check_quality ─┼─→ stg_people ─────→ dim_location ────────────────────────┼─→ fact_sales
+read_excel → transform_excel → load_excel_postgres ─┘                 └─→ stg_returns ──────────────────────────────────────────┘
 ```
 
-The two load branches run in parallel; `build_staging` waits for both.
+15 tasks. The two load branches run in parallel; `check_quality` waits for both. Staging is built only after the checks pass: three tables in parallel, then the dimensions and the fact table.
 
 | Task | What it does |
 |---|---|
@@ -49,15 +49,36 @@ The two load branches run in parallel; `build_staging` waits for both.
 | `read_excel` | Checks the `People` and `Returns` sheets in `superstore_extra.xlsx` and their headers; counts non-empty rows. |
 | `transform_excel` | Each sheet → its own UTF-8 CSV: numbers without `.0`, empty rows skipped. |
 | `load_excel_postgres` | Loads `raw.people` and `raw.returns` in a single transaction. |
-| `build_staging` | [`dags/sql/staging.sql`](dags/sql/staging.sql): types (`INTEGER`, `DATE`, `NUMERIC`), `TRIM`, `\xa0` replaced with a space, primary keys. |
-| `build_mart` | [`dags/sql/mart.sql`](dags/sql/mart.sql): star schema, foreign keys, row count reconciliation with staging. |
+| `check_quality` | [`dags/sql/dq_checks.sql`](dags/sql/dq_checks.sql): 15 checks on the raw layer, results go to `dq.check_results`. Any `FAIL` stops the DAG before staging. |
+| `stg_superstore`, `stg_people`, `stg_returns` | [`dags/sql/staging/`](dags/sql/staging/): types (`INTEGER`, `DATE`, `NUMERIC`), `TRIM`, `\xa0` replaced with a space, primary keys. One task per table. |
+| `dim_customer`, `dim_product`, `dim_date`, `dim_location` | [`dags/sql/mart/`](dags/sql/mart/): star schema dimensions. |
+| `fact_sales` | [`dags/sql/mart/fact_sales.sql`](dags/sql/mart/fact_sales.sql): sales fact table, foreign keys, row count reconciliation with staging. |
 
 - **Row count reconciliation** at every step: the DAG fails if the counts don't match.
 - **All or nothing**: raw loads run in a transaction and roll back on error, leaving existing data untouched. Staging and mart are rebuilt in full.
 - **Idempotent**: re-running doesn't duplicate data — 9994 rows deleted, 9994 loaded, the table still has 9994 rows.
 - **Keys as checks**: `PRIMARY KEY`, `UNIQUE`, `NOT NULL` and `FOREIGN KEY` constraints in staging and mart fail the DAG on duplicates or broken relationships.
+- **Quality checks before staging**: if bad data lands in raw, staging and mart keep their previous, correct state.
 - **No passwords in code**: the connection comes from the Airflow Connection `etl_postgres`.
 - Project data lives in a dedicated `etl_data` database, separate from Airflow's own metadata database.
+
+---
+
+## ✅ Data quality checks: `dq` schema
+
+The `check_quality` task runs 15 rules on the raw layer: empty load, duplicate and empty `row_id`s, date format and validity, ship date not before order date, number format, quantity and discount within limits, consistent customers and products, returns referencing existing orders, exactly one manager per region.
+
+| Severity | What happens |
+|---|---|
+| `ERROR` | Check fails → status `FAIL`, the task fails, staging and mart are not rebuilt. |
+| `WARNING` | Status `WARN`, the pipeline continues. Used for known quirks of the source: 32 `product_id`s with different names, 1 fully duplicated row. |
+
+- **`dq.check_results`** — check history: `run_id`, `check_no`, `check_name`, `severity`, `failed_count`, status `PASS` / `WARN` / `FAIL`. Results are committed before the task fails, so the history is kept for failed runs too.
+- **`dq.try_mdy_date`** — parses M/D/YYYY dates and returns `NULL` instead of an error for impossible dates (`2/30/2016`): `TO_DATE` would crash the task, and the check could not count such rows.
+
+```bash
+docker compose exec postgres psql -U airflow -d etl_data -c "SELECT check_no, check_name, status, failed_count FROM dq.check_results WHERE checked_at = (SELECT MAX(checked_at) FROM dq.check_results) ORDER BY check_no;"
+```
 
 ---
 
@@ -95,7 +116,7 @@ Reconciliation: total sales in `raw.superstore` and in `mart.fact_sales` match �
 | Folder / file | Contents |
 |---|---|
 | [dags/](dags/) | Airflow DAGs |
-| [dags/sql/](dags/sql/) | SQL for the staging and mart layers |
+| [dags/sql/](dags/sql/) | [`dq_checks.sql`](dags/sql/dq_checks.sql) — quality checks, [`staging/`](dags/sql/staging/) and [`mart/`](dags/sql/mart/) — one file per table |
 | [input/](input/) | Source files (`superstore.csv`, `superstore_extra.xlsx`) — not stored in git |
 | [output/](output/) | Intermediate UTF-8 CSVs before loading into raw |
 | [archive/](archive/) | Archive of processed files |
@@ -190,11 +211,11 @@ docker compose exec postgres psql -U airflow -d etl_data -c "SELECT COUNT(*) FRO
 
 ## 🖼️ Screenshots
 
-**DAG graph** — two load branches, then staging and mart; all eight tasks completed successfully:
+**DAG graph** — two load branches, quality checks, then staging and mart; all 15 tasks completed successfully:
 
 ![DAG graph](docs/dag_graph.png)
 
-**`load_postgres` task log** — a re-run replaced 9994 rows instead of appending them:
+**`check_quality` task log** — 15 checks: 13 `PASS` and 2 `WARN` for known source quirks, no `FAIL`:
 
 ![Task log](docs/task_logs.png)
 
@@ -206,7 +227,7 @@ docker compose exec postgres psql -U airflow -d etl_data -c "SELECT COUNT(*) FRO
 - [x] CSV → PostgreSQL ETL DAG (raw layer) with idempotent loading
 - [x] Second load branch: Excel → PostgreSQL (managers and returns)
 - [x] Data layers: raw → staging → mart (star schema)
-- [ ] Data quality checks before downstream processing
+- [x] Data quality checks before staging (`dq` schema)
 - [ ] Automatic processing of new files, without loading the same file twice
 - [ ] Daily schedule
 - [ ] Failure alerts in Telegram
@@ -214,4 +235,4 @@ docker compose exec postgres psql -U airflow -d etl_data -c "SELECT COUNT(*) FRO
 
 ---
 
-*ETL Airflow Project · last updated: 28.09.2026, 23:45 (Almaty, UTC+5)*
+*ETL Airflow Project · last updated: 29.09.2026, 17:25 (Almaty, UTC+5)*

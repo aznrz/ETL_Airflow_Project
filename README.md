@@ -34,12 +34,12 @@ Excel ─┘
 ## 🔄 Пайплайн `superstore_raw_dag`
 
 ```
-read_csv   → transform       → load_postgres       ─┐
-                                                    ├─→ build_staging → build_mart
-read_excel → transform_excel → load_excel_postgres ─┘
+read_csv   → transform       → load_postgres       ─┐                 ┌─→ stg_superstore ─→ dim_customer, dim_product, dim_date ─┐
+                                                    ├─→ check_quality ─┼─→ stg_people ─────→ dim_location ────────────────────────┼─→ fact_sales
+read_excel → transform_excel → load_excel_postgres ─┘                 └─→ stg_returns ──────────────────────────────────────────┘
 ```
 
-Две ветки загрузки идут параллельно, `build_staging` ждёт обе.
+15 задач. Две ветки загрузки идут параллельно, `check_quality` ждёт обе. Staging строится только после успешных проверок: три таблицы параллельно, затем измерения и факт.
 
 | Задача | Что делает |
 |---|---|
@@ -49,15 +49,36 @@ read_excel → transform_excel → load_excel_postgres ─┘
 | `read_excel` | Проверяет листы `People` и `Returns` в `superstore_extra.xlsx` и их заголовки, считает непустые строки. |
 | `transform_excel` | Каждый лист → свой UTF-8 CSV: числа без `.0`, пустые строки пропускаются. |
 | `load_excel_postgres` | Загружает `raw.people` и `raw.returns` в одной транзакции. |
-| `build_staging` | [`dags/sql/staging.sql`](dags/sql/staging.sql): типы (`INTEGER`, `DATE`, `NUMERIC`), `TRIM`, замена `\xa0` на пробел, первичные ключи. |
-| `build_mart` | [`dags/sql/mart.sql`](dags/sql/mart.sql): звёздная схема, внешние ключи, сверка строк с staging. |
+| `check_quality` | [`dags/sql/dq_checks.sql`](dags/sql/dq_checks.sql): 15 проверок слоя raw, результаты — в `dq.check_results`. Любой `FAIL` останавливает DAG до staging. |
+| `stg_superstore`, `stg_people`, `stg_returns` | [`dags/sql/staging/`](dags/sql/staging/): типы (`INTEGER`, `DATE`, `NUMERIC`), `TRIM`, замена `\xa0` на пробел, первичные ключи. Одна задача — одна таблица. |
+| `dim_customer`, `dim_product`, `dim_date`, `dim_location` | [`dags/sql/mart/`](dags/sql/mart/): измерения звёздной схемы. |
+| `fact_sales` | [`dags/sql/mart/fact_sales.sql`](dags/sql/mart/fact_sales.sql): факт продаж, внешние ключи, сверка строк с staging. |
 
 - **Сверка строк** на каждом шаге: если количество не сходится, DAG падает.
 - **Всё или ничего**: загрузка raw идёт в транзакции, при ошибке старые данные остаются нетронутыми. Staging и mart перестраиваются целиком.
 - **Идемпотентность**: повторный запуск не задваивает данные — удалено 9994, загружено 9994, в таблице по-прежнему 9994 строки.
 - **Ключи как проверки**: `PRIMARY KEY`, `UNIQUE`, `NOT NULL` и `FOREIGN KEY` в staging и mart роняют DAG, если в данных появились дубли или потерянные связи.
+- **Проверки качества до staging**: если в raw пришли плохие данные, staging и mart остаются в прежнем, корректном состоянии.
 - **Без паролей в коде**: подключение берётся из Airflow Connection `etl_postgres`.
 - Данные проекта лежат в отдельной базе `etl_data`, она не смешивается со служебной базой Airflow.
+
+---
+
+## ✅ Проверки качества данных: схема `dq`
+
+Задача `check_quality` выполняет 15 правил над слоем raw: пустая выгрузка, дубли и пустые `row_id`, формат и реальность дат, отгрузка не раньше заказа, формат чисел, количество и скидка в допустимых пределах, однозначность клиентов и товаров, возвраты по существующим заказам, ровно один менеджер на регион.
+
+| Уровень | Что происходит |
+|---|---|
+| `ERROR` | Проверка не прошла → статус `FAIL`, задача падает, staging и mart не перестраиваются. |
+| `WARNING` | Статус `WARN`, пайплайн продолжается. Так отмечены известные особенности источника: 32 `product_id` с разными названиями, 1 полный дубль строки. |
+
+- **`dq.check_results`** — история проверок: `run_id`, `check_no`, `check_name`, `severity`, `failed_count`, статус `PASS` / `WARN` / `FAIL`. Результаты сохраняются до того, как задача упадёт, поэтому история видна и для неудачных запусков.
+- **`dq.try_mdy_date`** — разбор даты М/Д/ГГГГ, который на невозможной дате (`2/30/2016`) возвращает `NULL` вместо ошибки: `TO_DATE` уронил бы задачу, и проверка не смогла бы посчитать такие строки.
+
+```bash
+docker compose exec postgres psql -U airflow -d etl_data -c "SELECT check_no, check_name, status, failed_count FROM dq.check_results WHERE checked_at = (SELECT MAX(checked_at) FROM dq.check_results) ORDER BY check_no;"
+```
 
 ---
 
@@ -95,7 +116,7 @@ dim_product ── fact_sales ── dim_location
 | Папка / файл | Что внутри |
 |---|---|
 | [dags/](dags/) | DAG для Airflow |
-| [dags/sql/](dags/sql/) | SQL слоёв staging и mart |
+| [dags/sql/](dags/sql/) | [`dq_checks.sql`](dags/sql/dq_checks.sql) — проверки качества, [`staging/`](dags/sql/staging/) и [`mart/`](dags/sql/mart/) — по одному файлу на таблицу |
 | [input/](input/) | Исходные файлы (`superstore.csv`, `superstore_extra.xlsx`) — в git не хранятся |
 | [output/](output/) | Промежуточные UTF-8 CSV перед загрузкой в raw |
 | [archive/](archive/) | Архив обработанных файлов |
@@ -190,11 +211,11 @@ docker compose exec postgres psql -U airflow -d etl_data -c "SELECT COUNT(*) FRO
 
 ## 🖼️ Скриншоты
 
-**Граф DAG** — две ветки загрузки, затем staging и mart; все восемь задач выполнились успешно:
+**Граф DAG** — две ветки загрузки, проверки качества, затем staging и mart; все 15 задач выполнились успешно:
 
 ![Граф DAG](docs/dag_graph.png)
 
-**Лог задачи `load_postgres`** — повторный запуск заменил 9994 строки, а не добавил их:
+**Лог задачи `check_quality`** — 15 проверок: 13 `PASS` и 2 `WARN` по известным особенностям источника, ни одного `FAIL`:
 
 ![Лог задачи](docs/task_logs.png)
 
@@ -206,7 +227,7 @@ docker compose exec postgres psql -U airflow -d etl_data -c "SELECT COUNT(*) FRO
 - [x] ETL-DAG: CSV → PostgreSQL (слой raw), идемпотентная загрузка
 - [x] Вторая ветка загрузки: Excel → PostgreSQL (менеджеры и возвраты)
 - [x] Слои данных: raw → staging → mart (звёздная схема)
-- [ ] Проверки качества данных перед загрузкой
+- [x] Проверки качества данных перед staging (схема `dq`)
 - [ ] Автоматическая обработка новых файлов без повторной загрузки
 - [ ] Ежедневное расписание
 - [ ] Уведомления об ошибках в Telegram
@@ -214,4 +235,4 @@ docker compose exec postgres psql -U airflow -d etl_data -c "SELECT COUNT(*) FRO
 
 ---
 
-*ETL Airflow Project · последнее обновление: 28.09.2026, 23:45 (Алматы, UTC+5)*
+*ETL Airflow Project · последнее обновление: 29.09.2026, 17:25 (Алматы, UTC+5)*

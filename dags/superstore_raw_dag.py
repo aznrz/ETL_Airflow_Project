@@ -243,12 +243,82 @@ def load_excel_postgres(ti):
     run_loads_in_transaction(loads)
 
 
+# ---------- Проверки качества данных ----------
+DQ_SQL_FILE = os.path.join(os.path.dirname(__file__), "sql", "dq_checks.sql")
+
+
+def check_quality(run_id):
+    # Выполнить проверки, сохранить результаты в dq.check_results,
+    # упасть, если хоть одна проверка уровня ERROR не прошла
+    with open(DQ_SQL_FILE, encoding="utf-8") as f:
+        checks_sql = f.read()
+
+    checked_at = utc_now_text()
+    hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+    conn = hook.get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(checks_sql)          # последним идёт SELECT с результатами
+            results = cur.fetchall()
+
+            # при повторном запуске (Clear) старые результаты этого run_id заменяются
+            cur.execute("DELETE FROM dq.check_results WHERE run_id = %s", (run_id,))
+
+            rows = []
+            for check_no, check_name, severity, failed_count in results:
+                if failed_count == 0:
+                    status = "PASS"
+                elif severity == "ERROR":
+                    status = "FAIL"
+                else:
+                    status = "WARN"
+                rows.append((run_id, checked_at, check_no, check_name, severity, failed_count, status))
+
+            cur.executemany(
+                "INSERT INTO dq.check_results "
+                "(run_id, checked_at, check_no, check_name, severity, failed_count, status) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                rows,
+            )
+        conn.commit()   # результаты сохраняются ДО того, как задача упадёт
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    for _, _, check_no, check_name, severity, failed_count, status in rows:
+        print(f"{status:4} | #{check_no:>2} {check_name:<30} | {severity:<7} | failed: {failed_count}")
+
+    failed = [r for r in rows if r[6] == "FAIL"]
+    warned = [r for r in rows if r[6] == "WARN"]
+    print(f"Summary: {len(rows)} checks, {len(failed)} FAIL, {len(warned)} WARN")
+
+    if failed:
+        names = ", ".join(f"#{r[2]} {r[3]} ({r[5]})" for r in failed)
+        raise ValueError(f"Data quality check failed: {names}")
+
+    return {"checks": len(rows), "failed": 0, "warnings": len(warned)}
+
+
+# ---------- SQL-задачи ----------
+def sql_task(task_id, sql_file):
+    # Одна SQL-задача = один файл из dags/sql
+    return SQLExecuteQueryOperator(
+        task_id=task_id,
+        conn_id=POSTGRES_CONN_ID,
+        sql=sql_file,
+        show_return_value_in_logs=True,
+    )
+
+
 # ---------- DAG ----------
 with DAG(
     dag_id="superstore_raw_dag",
     start_date=datetime(2026, 9, 1),
     schedule=None,      # пока только ручной запуск
     catchup=False,
+    max_active_runs=1,  # новый запуск ждёт окончания предыдущего
     tags=["etl", "superstore"],
 ) as dag:
 
@@ -262,20 +332,27 @@ with DAG(
     e2 = PythonOperator(task_id="transform_excel", python_callable=transform_excel)
     e3 = PythonOperator(task_id="load_excel_postgres", python_callable=load_excel_postgres)
 
-    # Слои staging и mart: SQL-файлы из папки dags/sql
-    s1 = SQLExecuteQueryOperator(
-        task_id="build_staging",
-        conn_id=POSTGRES_CONN_ID,
-        sql="sql/staging.sql",
-        show_return_value_in_logs=True,
-    )
-    m1 = SQLExecuteQueryOperator(
-        task_id="build_mart",
-        conn_id=POSTGRES_CONN_ID,
-        sql="sql/mart.sql",
-        show_return_value_in_logs=True,
-    )
+    # Проверки качества: стоят между загрузкой и staging
+    dq = PythonOperator(task_id="check_quality", python_callable=check_quality)
+
+    # ---------- staging: по одной задаче на таблицу ----------
+    stg_superstore = sql_task("stg_superstore", "sql/staging/superstore.sql")
+    stg_people     = sql_task("stg_people",     "sql/staging/people.sql")
+    stg_returns    = sql_task("stg_returns",    "sql/staging/returns.sql")
+
+    # ---------- mart: звёздная схема ----------
+    dim_customer = sql_task("dim_customer", "sql/mart/dim_customer.sql")
+    dim_product  = sql_task("dim_product",  "sql/mart/dim_product.sql")
+    dim_date     = sql_task("dim_date",     "sql/mart/dim_date.sql")
+    dim_location = sql_task("dim_location", "sql/mart/dim_location.sql")
+    fact_sales   = sql_task("fact_sales",   "sql/mart/fact_sales.sql")
 
     t1 >> t2 >> t3
     e1 >> e2 >> e3
-    [t3, e3] >> s1 >> m1   # staging ждёт ОБЕ загрузки
+    [t3, e3] >> dq                                   # проверки ждут ОБЕ загрузки
+    dq >> [stg_superstore, stg_people, stg_returns]  # staging параллельно
+
+    stg_superstore >> [dim_customer, dim_product, dim_date, dim_location]
+    stg_people >> dim_location                       # адреса + менеджеры
+
+    [dim_customer, dim_product, dim_date, dim_location, stg_returns] >> fact_sales
